@@ -1,0 +1,150 @@
+---
+title: "15August"
+author: "Hope Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library(ape)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(hrbrthemes)
+```
+
+
+```{r cars}
+individual_tree <- read.tree(text="((((((1:2e-5):3e-4,((2:2e-5):2e-4,(3:2e-5):2e-4):3e-4):3e-4,((4:2e-5):3e-4,(5:2e-5):3e-4):3e-4):5e-4,((6:2e-5):8e-4,((7:2e-5):4e-4,(8:2e-5):4e-4):5e-4):5e-4):3e-4,((9:2e-5):5e-4,(10:2e-5):6e-4):5e-4):9e-4,(outgroup:2e-5):2e-3);")
+plot(individual_tree, edge.width=2, label.offset=0.0001)
+edgelabels(individual_tree$edge.length, bg="black", col="white", font=3, cex=0.7)
+```
+
+```{r}
+haplotype_tree <- read.tree(text="((((((1_hap1:2e-5,1_hap2:2e-5):3e-4,((2_hap1:2e-5,2_hap2:2e-5):2e-4,(3_hap1:2e-5,3_hap2:2e-5):2e-4):3e-4):3e-4,((4_hap1:2e-5,4_hap2:2e-5):3e-4,(5_hap1:2e-5,5_hap2:2e-5):3e-4):3e-4):5e-4,((6_hap1:2e-5,6_hap2:2e-5):8e-4,((7_hap1:2e-5,7_hap2:2e-5):4e-4,(8_hap1:2e-5,8_hap2:2e-5):4e-4):5e-4):5e-4):3e-4,((9_hap1:2e-5,9_hap2:2e-5):5e-4,(10_hap1:2e-5,10_hap2:2e-5):6e-4):5e-4):9e-4,(hap21:2e-5,hap22:2e-5):2e-3);")
+haplotype_tree <- drop.tip(haplotype_tree, c("hap21","hap22"))
+plot(haplotype_tree, edge.width=2, label.offset=0.0001)
+edgelabels(haplotype_tree$edge.length, bg="black", col="white", font=3, cex=0.7)
+
+tree_distances <- cophenetic.phylo(haplotype_tree) %>% as.matrix() %>% as.table() %>% as.data.frame()
+colnames(tree_distances) <- c("tip1","tip2","distance")
+```
+
+```{r calc-true-distances, eval=TRUE}
+individual_tree <- drop.tip(individual_tree, "outgroup")
+
+TRUE_df <- as.data.frame(cophenetic.phylo(individual_tree)) %>%
+  rownames_to_column("ind_i") %>%
+  pivot_longer(-ind_i, names_to = "ind_j", values_to = "true_distance") %>%
+  filter(ind_i != ind_j) %>%
+  mutate(
+    ind_i_num = as.numeric(ind_i),
+    ind_j_num = as.numeric(ind_j),
+    pair = paste0(pmin(ind_i_num, ind_j_num), "_", pmax(ind_i_num, ind_j_num))
+  ) %>%
+  group_by(pair) %>%
+  summarise(true_distance = mean(true_distance), .groups = "drop")
+```
+
+```{r}
+distAngsd <- read.table(file="data/distAngsd_results.txt",sep="\t",header=TRUE)
+colnames(distAngsd) = c("depth","indi_1", "indi_2", "distAngsd_estimate")
+distAngsd <- distAngsd %>% mutate(pair = paste0(indi_1,"_",indi_2)) %>% select(depth,pair,distAngsd_estimate)
+distAngsd$distAngsd_estimate <- as.numeric(sub("\\.$", "", distAngsd$distAngsd_estimate))
+```
+
+Import RAxML trees, calc distance
+```{r}
+#rename tree names with just the depth, for easy of keeping track of distances later
+tree_files <- sort(list.files(
+  path = "data",
+  pattern = "\\.bestTree$",
+  full.names = TRUE
+))
+tree_names <- gsub("^aligned_([0-9.]+)X\\.raxml.bestTree$", "\\1", basename(tree_files))
+names(tree_files) <- tree_names
+
+tree_list <- lapply(tree_files, function(f) {
+  read.tree(text = readLines(f, warn = FALSE))
+})
+
+#loop through trees, calc distance and add to list
+all_RaxML_distances <- list()
+
+for (tree_name in tree_names) {
+  tree <- tree_list[[tree_name]]
+  tree <- drop.tip(tree, "hap21")
+  depth <-tree_name
+  
+  tmp_treedist <- as.data.frame(cophenetic.phylo(tree)) %>%
+    rownames_to_column("ind_i") %>%
+    pivot_longer(-ind_i, names_to = "ind_j", values_to = "RAxML_distance") %>%
+    filter(ind_i != ind_j) %>%
+    mutate(
+      ind_i_num = as.numeric(ind_i),
+      ind_j_num = as.numeric(ind_j),
+      pair = paste0(pmin(ind_i_num, ind_j_num), "_", pmax(ind_i_num, ind_j_num))
+    ) %>%
+      group_by(pair) %>%
+      summarise(RAxML_distance = mean(RAxML_distance), .groups = "drop") %>%
+      mutate(depth = depth)
+  
+  all_RaxML_distances[[tree_name]] <- tmp_treedist
+}
+#bind all rows into the new df
+RAxML_df <- bind_rows(all_RaxML_distances)
+RAxML_df$depth<-as.numeric(RAxML_df$depth)
+```
+
+Merge dataframes
+```{r}
+RAxML_df <- RAxML_df %>% mutate (depth_pair=paste0(depth,"_",pair)) 
+distAngsd <- distAngsd %>% mutate (depth_pair=paste0(depth,"_",pair)) 
+
+combined_df <-left_join(TRUE_df, distAngsd, by = "pair")
+combined_df <-left_join(combined_df, RAxML_df %>% select(depth_pair, RAxML_distance),by= "depth_pair") %>% select(depth, pair, distAngsd_estimate, true_distance, RAxML_distance)
+combined_df$depth <- factor(as.numeric(combined_df$depth))
+combined_df <-combined_df %>%
+  pivot_longer(
+    cols = c("distAngsd_estimate", "RAxML_distance"),   # select all method columns
+    names_to = "method",            # new column for method names
+    values_to = "estimate"          # new column for error values
+  ) 
+combined_df <- combined_df %>% mutate(error=100*(abs(estimate-true_distance)/true_distance))
+combined_df <- combined_df %>% mutate(error_nonrel=(abs(estimate-true_distance)))
+combined_df <- combined_df %>% mutate(error_rel=(abs(estimate-true_distance)/true_distance))
+
+```
+
+```{r}
+combined_df
+```
+
+
+Plot
+```{r}
+png(width = 8.5, height = 5, units = "in", res = 300, filename = "plots/distance_error_by_2methods.png")
+
+ggplot(data = combined_df, aes(x = depth, y = error, color=method)) +
+  geom_boxplot()+
+  #geom_jitter(alpha = .8, width = 0.05, size=.5, data = combined_df, aes(x = depth, y = error_rel, color = method))+
+  #stat_summary(aes(colour = method), fun.data = `mean_se`,size=1) +
+  scale_color_manual(values=c("#332288", "#999933"))+
+  labs(
+    title = "Error by Depth & Method",
+    subtitle = "snakemake",
+    x = "Depth",
+    y = "Error",
+    color = "Method"
+  ) +
+  #ylim(0,8e-4)+
+  theme_minimal()
+
+dev.off()
+```
